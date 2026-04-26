@@ -1,0 +1,54 @@
+# --- Sensitive: real PDFs / generated outputs ---
+backend/uploads/
+backend/results/
+logs/
+
+# --- 3rd-party binaries (document where to get them in README) ---
+backend/assets/Tesseract-OCR/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# --- PyInstaller ---
+backend/build/
+backend/dist/
+backend/app.spec
+dist-backend/
+
+# --- Node / Vite ---
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# --- Electron Packager / Builder ---
+frontend/build-final/
+frontend/build/
+frontend/dist-electron-final/
+frontend/dist-electron/
+
+# --- Inno Setup output ---
+installer-output/
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# --- Local env / secrets ---
+.env
+.env.local
+*.local
+
+# --- Debug / scratch (from this session) ---
+spawn_test*.js
+BUILD_SUCCESS.md

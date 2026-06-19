@@ -31,6 +31,8 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 from cpce.engine import CPCEEngine, DecisionResult
 from cpce.pdf_processor import PDFProcessor
 from models import PageRecord, DocumentResult, PrintMode, MetadataSource
+from highlight_rescue import find_highlighted_pages
+from large_doc import should_use_fast_path, process_large_pdf
 
 
 class _SourceShim:
@@ -104,12 +106,28 @@ def process_pdf(pdf_path: str, doc_id: Optional[str] = None) -> DocumentResult:
             "PDF processing unavailable — PyMuPDF and OpenCV must be installed."
         )
 
+    case_id = doc_id or f"case_{Path(pdf_path).stem}"
+
+    # Large-document fast path. For docs >= LARGE_DOC_THRESHOLD pages, cheaply
+    # triage out monochrome pages (no rasterizing) and only feed the uncertain
+    # ones to the engine — avoiding the whole-document-into-RAM OOM and the long
+    # runtime on huge records. Smaller docs fall through to the unchanged path.
+    page_count = _pdf_processor.get_page_count(pdf_path)
+    if should_use_fast_path(page_count):
+        pages = process_large_pdf(
+            pdf_path,
+            _engine,
+            pdf_processor_factory=lambda dpi: PDFProcessor(dpi=dpi),
+            map_decision=_map_decision,
+            case_id=case_id,
+        )
+        return DocumentResult(total_pages=page_count, pages=pages)
+
     # Stage 0: rasterise pages once, pass list around.
     images = _pdf_processor.load_pdf(pdf_path)
     if not images:
         raise RuntimeError(f"PDF has no pages: {pdf_path}")
 
-    case_id = doc_id or f"case_{Path(pdf_path).stem}"
     _engine.initialize_case(case_id, str(pdf_path))
 
     # Stages 1-11: the full CPCE pipeline.
@@ -123,6 +141,36 @@ def process_pdf(pdf_path: str, doc_id: Optional[str] = None) -> DocumentResult:
     pages: List[PageRecord] = [
         _map_decision(dr, page_id=i + 1) for i, dr in enumerate(decisions)
     ]
+
+    # Highlight rescue (orchestration-layer safety net).
+    # The engine's pixel-based yellow gate (saturation >= 100) misses pale
+    # "flattened" highlights — e.g. Westlaw/Lexis exports rendered as a vector
+    # fill of RGB(255,255,173), saturation ~81 — and sends those pages to B&W,
+    # losing the highlight on print. Re-inspect ONLY the B&W pages using PDF
+    # structure (annotations + colored vector fills under text). This can only
+    # flip B&W -> COLOR, so it cannot regress any page already decided COLOR.
+    bw_indices = [
+        i for i, pr in enumerate(pages) if pr.final_print_mode == PrintMode.BW
+    ]
+    if bw_indices:
+        try:
+            rescued = find_highlighted_pages(str(pdf_path), bw_indices)
+        except Exception as exc:  # never let the safety net break a real result
+            print(f"  Highlight rescue skipped (error): {exc}")
+            rescued = {}
+        for i, reason in rescued.items():
+            pr = pages[i]
+            pr.final_print_mode = PrintMode.COLOR
+            pr.bw_guaranteed = False
+            pr.color_candidate = True
+            pr.metadata_source = _SourceShim("highlight_rescue")
+            pr.decision_details = (
+                f"HIGHLIGHT RESCUE ({reason}) — pale/flattened highlight the "
+                f"pixel engine missed | prior: {pr.decision_details}"
+            )
+        if rescued:
+            print(f"  Highlight rescue: {len(rescued)} page(s) flipped BW->COLOR")
+
     return DocumentResult(total_pages=len(images), pages=pages)
 
 

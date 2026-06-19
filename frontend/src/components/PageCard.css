@@ -11,7 +11,7 @@
 }
 
 .page-thumb.color {
-  border-color: #ec4899;
+  border-color: #f59e0b;
 }
 
 .page-thumb.bw {
@@ -64,33 +64,32 @@
   -webkit-user-drag: none;
 }
 
-.color-dot {
+/* Top-right word label: Review (orange) / Color (confirmed) / BW */
+.page-label {
   position: absolute;
   top: 4px;
   right: 4px;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  box-shadow: 0 0 0 1.5px white, 0 1px 2px rgba(0, 0, 0, 0.3);
+  padding: 1px 7px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  border-radius: 3px;
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
 }
 
-.color-dot.color {
-  background: #ec4899;
-}
-
-.color-dot.bw {
-  background: #6b7280;
-}
-
-.override-dot {
-  position: absolute;
-  top: 4px;
-  right: 18px;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+.page-label.review {
   background: #f59e0b;
-  box-shadow: 0 0 0 1.5px white;
+}
+
+.page-label.confirmed {
+  background: #ea580c;
+}
+
+.page-label.bw {
+  background: #6b7280;
 }
 
 .page-num {

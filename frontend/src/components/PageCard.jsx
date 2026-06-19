@@ -1,39 +1,30 @@
-import React, { useRef } from 'react'
+import React from 'react'
 import './PageCard.css'
 
-function PageCard({ page, onToggle, onExpand }) {
+function PageCard({ page, onExpand }) {
   const isColor = page.decision === 'Color'
   const isPending = page.decision == null
-  const clickTimer = useRef(null)
 
   const handleClick = () => {
     if (isPending) return
-    if (clickTimer.current) {
-      clearTimeout(clickTimer.current)
-      clickTimer.current = null
-      onExpand(page)
-      return
-    }
-    clickTimer.current = setTimeout(() => {
-      clickTimer.current = null
-      onToggle(page.page_id, isColor ? 'B&W' : 'Color')
-    }, 220)
-  }
-
-  const handleExpandClick = (e) => {
-    e.stopPropagation()
-    if (isPending) return
-    if (clickTimer.current) {
-      clearTimeout(clickTimer.current)
-      clickTimer.current = null
-    }
     onExpand(page)
   }
 
+  // Top-right word label:
+  //  - color page flagged by the engine → "Review" (orange, needs a human look)
+  //  - once the user has overridden it → "Color" (confirmed)
+  //  - black & white → "BW"
   const stateClass = isPending ? 'pending' : isColor ? 'color' : 'bw'
+  let label = null
+  if (!isPending) {
+    if (isColor) label = page.overridden ? 'Color' : 'Review'
+    else label = 'BW'
+  }
+  const labelClass = isColor ? (page.overridden ? 'confirmed' : 'review') : 'bw'
+
   const title = isPending
     ? `Page ${page.page_id} — analysing...`
-    : `Page ${page.page_id} — click to toggle, double-click to expand`
+    : `Page ${page.page_id} — click to open`
 
   return (
     <div
@@ -48,18 +39,8 @@ function PageCard({ page, onToggle, onExpand }) {
           <div className="thumb-placeholder" />
         )}
       </div>
-      {!isPending && <span className={`color-dot ${isColor ? 'color' : 'bw'}`} />}
-      {page.overridden && <span className="override-dot" title="Overridden" />}
+      {label && <span className={`page-label ${labelClass}`}>{label}</span>}
       <span className="page-num">{page.page_id}</span>
-      {!isPending && (
-        <button
-          className="expand-btn"
-          onClick={handleExpandClick}
-          title="Open detail view"
-        >
-          ⤢
-        </button>
-      )}
     </div>
   )
 }

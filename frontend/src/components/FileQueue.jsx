@@ -41,8 +41,9 @@ function FileQueue({ documents, onFileSelect, onFileUpload, onFileDelete, onDele
       onDragLeave={handleDragLeave}
     >
       <div className="upload-bar">
-        <button className="upload-btn" onClick={handleUploadClick} title="Upload PDFs (or drag here)">
-          + Upload PDF
+        <button className="upload-box" onClick={handleUploadClick} title="Click to upload PDFs, or drag &amp; drop here">
+          <span className="upload-box-icon">+</span>
+          <span className="upload-box-text">Drop PDF</span>
         </button>
         {documents.length > 0 && (
           <button className="clear-all-btn" onClick={onDeleteAll} title="Delete all files">

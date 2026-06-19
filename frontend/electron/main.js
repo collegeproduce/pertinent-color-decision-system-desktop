@@ -29,7 +29,11 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      enableRemoteModule: false
+      enableRemoteModule: false,
+      // Keep the renderer (and its SSE progress stream) running at full speed
+      // when the window is hidden/minimized or the user switches to another app.
+      // Default is true, which throttles timers and stalls live analysis updates.
+      backgroundThrottling: false
     },
     title: 'Pertinent Color Decision System',
     backgroundColor: '#f5f5f5',

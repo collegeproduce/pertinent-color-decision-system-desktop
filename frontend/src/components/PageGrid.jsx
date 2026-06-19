@@ -99,7 +99,6 @@ function PageGrid({ document, onUpdate }) {
           <PageCard
             key={page.page_id}
             page={page}
-            onToggle={handleOverride}
             onExpand={handleExpand}
           />
         ))}

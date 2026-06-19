@@ -1,6 +1,7 @@
 # --- Sensitive: real PDFs / generated outputs ---
 backend/uploads/
 backend/results/
+input/
 logs/
 
 # --- 3rd-party binaries (document where to get them in README) ---

@@ -62,7 +62,7 @@ else:
 
 UPLOAD_FOLDER = base_dir / 'uploads'
 RESULTS_FOLDER = base_dir / 'results'
-MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50MB
+MAX_UPLOAD_SIZE = 4 * 1024 * 1024 * 1024  # 4GB — local offline tool; large litigation/medical PDFs exceeded the old 50MB cap and were rejected at upload
 ALLOWED_EXTENSIONS = {'pdf'}
 
 # Create folders
@@ -178,6 +178,7 @@ def process_engine_job(doc_id, filepath, filename):
 
         push_event(doc_id, 'analyzed', {'pages': pages_data, 'summary': summary})
         push_event(doc_id, 'done', {})
+        _persist_doc(doc_id)  # survive restart / app close
         print(
             f"✅ {filename}: {summary['color_pages']} color, "
             f"{summary['bw_pages']} B&W, "
@@ -275,6 +276,108 @@ def format_page_data(page_record, preview_url):
         'preview': preview_url,
         'overridden': False  # Will be set to True if user overrides
     }
+
+
+# ============================================================
+# Result persistence (survive backend restart / app close)
+# ============================================================
+# document_cache is in-memory only. Without this, closing the app or restarting
+# the backend loses every analysed document. On completion (and on override) we
+# snapshot the JSON-serialisable state to RESULTS_FOLDER; on startup we reload it
+# so finished work reappears. Preview thumbnails are re-rendered lazily from the
+# original PDF if it still exists.
+
+class _PersistedSource:
+    """Stand-in so a reconstructed PageRecord exposes `.metadata_source.value`."""
+    __slots__ = ("value",)
+
+    def __init__(self, value):
+        self.value = value
+
+
+def _cache_path(doc_id):
+    # Distinct prefix so these never collide with user export files.
+    return RESULTS_FOLDER / f"cache_{doc_id}.json"
+
+
+def _persist_doc(doc_id):
+    """Write a finished document's state to disk. Best-effort; never raises."""
+    try:
+        with cache_lock:
+            d = document_cache.get(doc_id)
+            if not d or d.get('status') != 'done' or d.get('pages_data') is None:
+                return
+            snapshot = {
+                'doc_id': doc_id,
+                'filename': d['filename'],
+                'filepath': d['filepath'],
+                'uploaded_at': d.get('uploaded_at'),
+                'total_pages': d.get('total_pages'),
+                'status': 'done',
+                'summary': d.get('summary'),
+                'pages_data': d.get('pages_data'),
+                'analysis_seconds': d.get('analysis_seconds'),
+            }
+        with open(_cache_path(doc_id), 'w', encoding='utf-8') as f:
+            json.dump(snapshot, f)
+    except Exception as e:
+        print(f"⚠️  Could not persist {doc_id}: {e}")
+
+
+def _result_from_pages(pages_data, total_pages):
+    """Rebuild a DocumentResult from persisted page dicts so exports still work."""
+    from models import PageRecord, DocumentResult
+    pages = []
+    for p in (pages_data or []):
+        pr = PageRecord(page_id=p['page_id'])
+        is_color = 'color' in str(p.get('decision', '')).lower()
+        pr.final_print_mode = PrintMode.COLOR if is_color else PrintMode.BW
+        pr.bw_guaranteed = not is_color
+        pr.color_candidate = is_color
+        pr.metadata_source = _PersistedSource(p.get('source') or 'unknown')
+        pr.decision_details = p.get('reason') or ''
+        pages.append(pr)
+    return DocumentResult(total_pages=total_pages or len(pages), pages=pages)
+
+
+def _load_persisted_docs():
+    """Restore previously-analysed documents into the cache at startup."""
+    count = 0
+    for f in sorted(RESULTS_FOLDER.glob("cache_*.json")):
+        try:
+            with open(f, encoding='utf-8') as fh:
+                snap = json.load(fh)
+            doc_id = snap['doc_id']
+            total = snap.get('total_pages')
+            document_cache[doc_id] = {
+                'doc_id': doc_id,
+                'filename': snap['filename'],
+                'filepath': snap['filepath'],
+                'uploaded_at': snap.get('uploaded_at'),
+                'status': 'done',
+                'total_pages': total,
+                'previews': {},
+                'pages_data': snap.get('pages_data'),
+                'summary': snap.get('summary'),
+                'result': _result_from_pages(snap.get('pages_data'), total),
+                'processed': True,
+                'analysis_seconds': snap.get('analysis_seconds'),
+            }
+            event_queues.setdefault(doc_id, [])
+            count += 1
+            # Re-render thumbnails in the background if the source PDF still exists.
+            fp = snap.get('filepath')
+            if fp and total and Path(fp).exists():
+                PREVIEW_EXECUTOR.submit(render_previews_job, doc_id, fp, total)
+        except Exception as e:
+            print(f"⚠️  Could not restore {f.name}: {e}")
+    if count:
+        print(f"♻️  Restored {count} document(s) from previous session")
+
+
+# Restore prior session's work at import time (runs for both `python app.py`
+# and any WSGI/embedded launch).
+_load_persisted_docs()
 
 
 # ============================================================
@@ -554,7 +657,9 @@ def override_decision(doc_id, page_id):
         print(f"✏️  Override: Page {page_id} → {new_decision}")
         print(f"   Original: {original_decision} → New: {new_decision}")
         print(f"   Updated summary: {summary['color_pages']} color, {summary['bw_pages']} B&W\n")
-        
+
+        _persist_doc(doc_id)  # keep the override across restarts
+
         return jsonify({
             'success': True,
             'summary': summary
@@ -660,6 +765,15 @@ def clear_document(doc_id):
                 print(f"⚠️  Could not delete {filepath}: {e}")
 
         override_manager.clear_document(doc_id)
+
+        # Remove the persisted snapshot so it doesn't reappear on next startup.
+        try:
+            cp = _cache_path(doc_id)
+            if cp.exists():
+                cp.unlink()
+        except Exception as e:
+            print(f"⚠️  Could not remove persisted snapshot for {doc_id}: {e}")
+
         print(f"✓ Cleared document: {doc_id}\n")
 
         return jsonify({

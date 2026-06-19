@@ -3,6 +3,7 @@ import './App.css'
 import axios from 'axios'
 import FileQueue from './components/FileQueue'
 import PageGrid from './components/PageGrid'
+import { exportPrintDecisionsXlsx } from './lib/exportPrintDecisions'
 
 const IS_ELECTRON = !!window.electronAPI
 const API_BASE = IS_ELECTRON ? 'http://localhost:5000' : ''
@@ -37,6 +38,10 @@ function App() {
   const eventSources = useRef({})
   // Track rendered preview page_ids per doc, before `analyzed` arrives.
   const rendered = useRef({})
+  // Docs that reached a terminal state (done/error) — never auto-reconnect these.
+  const terminal = useRef(new Set())
+  // Pending reconnect timers per doc, so we can cancel them on cleanup.
+  const reopenTimers = useRef({})
 
   const selectedDocument = documents.find((doc) => doc.doc_id === selectedDocId)
 
@@ -106,19 +111,28 @@ function App() {
         try {
           msg = JSON.parse(e.data).message || msg
         } catch {}
+        terminal.current.add(docId)
         updateDoc(docId, { status: 'error', error: msg })
         closeStream(docId)
       })
 
       es.addEventListener('done', () => {
+        terminal.current.add(docId)
         closeStream(docId)
       })
 
-      // Network-level error (server down, CORS, etc.) — fires onerror without a
-      // 'data' payload. Close the stream so we don't leak.
+      // Network-level error (server down, CORS, sleep, backgrounding) — fires
+      // onerror without a 'data' payload. EventSource sets CLOSED when it gives
+      // up. If the doc hasn't finished, the analysis is still running on the
+      // backend, so reconnect after a short delay — the SSE endpoint replays
+      // current state on subscribe, so we catch up without losing progress.
       es.onerror = () => {
         if (es.readyState === EventSource.CLOSED) {
           closeStream(docId)
+          if (!terminal.current.has(docId)) {
+            clearTimeout(reopenTimers.current[docId])
+            reopenTimers.current[docId] = setTimeout(() => openStream(docId), 1500)
+          }
         }
       }
     },
@@ -127,10 +141,73 @@ function App() {
 
   // Cleanup on unmount.
   useEffect(() => {
+    const timers = reopenTimers.current
     return () => {
       Object.keys(eventSources.current).forEach(closeStream)
+      Object.values(timers).forEach(clearTimeout)
     }
   }, [closeStream])
+
+  // Rehydrate previously-analysed documents on launch. The backend persists
+  // finished work to disk and reloads it into its cache, so a closed/reopened
+  // app (or a backend restart) no longer loses results. Opening each stream
+  // replays the document's full state (pages + summary) back to us.
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await axios.get('/api/documents')
+        const docs = res.data?.documents || []
+        if (cancelled || docs.length === 0) return
+        const restored = docs.map((d) => ({
+          doc_id: d.doc_id,
+          filename: d.filename,
+          status: d.status || 'done',
+          total_pages: d.total_pages,
+          summary: d.summary || {
+            total_pages: d.total_pages,
+            color_pages: 0,
+            bw_pages: 0,
+            efficiency: 0,
+          },
+          pages: [],
+        }))
+        setDocuments((prev) => {
+          const have = new Set(prev.map((p) => p.doc_id))
+          return [...prev, ...restored.filter((r) => !have.has(r.doc_id))]
+        })
+        setSelectedDocId((prev) => prev || restored[0].doc_id)
+        restored.forEach((d) => {
+          rendered.current[d.doc_id] = new Set()
+          openStream(d.doc_id)
+        })
+      } catch {
+        // No prior session (or backend not up yet) — start clean.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [openStream])
+
+  // When the window becomes visible again (user returned from another app/tab),
+  // reopen streams for any document still in progress whose connection dropped
+  // while we were hidden.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      documents.forEach((d) => {
+        if (
+          (d.status === 'queued' || d.status === 'analyzing') &&
+          !eventSources.current[d.doc_id]
+        ) {
+          openStream(d.doc_id)
+        }
+      })
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [documents, openStream])
 
   const handleFileUpload = async (files) => {
     setError(null)
@@ -203,28 +280,20 @@ function App() {
     )
   }
 
-  const handleExportCSV = async () => {
-    const ready = documents.filter((d) => d.status === 'done').map((d) => d.doc_id)
+  const handleExportCSV = () => {
+    // Client-side XLSX export (matches pertinent-color-export-pkg): one row per
+    // finished document, with overrides already reflected in each page.decision.
+    const ready = documents.filter((d) => d.status === 'done')
     if (ready.length === 0) {
       alert('No completed documents to export yet.')
       return
     }
     try {
-      const response = await axios.post(
-        '/api/export/csv',
-        { doc_ids: ready, filename: 'pertinent_color_results.csv' },
-        { responseType: 'blob' }
-      )
-      const url = window.URL.createObjectURL(new Blob([response.data]))
-      const link = document.createElement('a')
-      link.href = url
-      link.setAttribute('download', 'pertinent_color_results.csv')
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
+      const filename = exportPrintDecisionsXlsx(documents)
+      if (!filename) alert('Nothing to export yet.')
     } catch (err) {
-      console.error('Failed to export CSV:', err)
-      alert('Failed to export CSV')
+      console.error('Failed to export:', err)
+      alert('Failed to export spreadsheet')
     }
   }
 
@@ -261,7 +330,7 @@ function App() {
         <div className="header-actions">
           {documents.length > 0 && (
             <button className="header-btn" onClick={handleExportCSV}>
-              Export CSV
+              Export
             </button>
           )}
         </div>

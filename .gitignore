@@ -23,6 +23,7 @@ backend/build/
 backend/dist/
 backend/app.spec
 dist-backend/
+build-backend/
 
 # --- Node / Vite ---
 frontend/node_modules/

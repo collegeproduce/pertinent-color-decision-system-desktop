@@ -60,6 +60,13 @@ _NEAR_BLACK = 0.15       # fills darker than this on every channel are ink/black
 # it as a genuine highlight (vs. a small colored glyph or icon).
 _MIN_WORDS_ON_FILL = 3
 
+# Minimum fill HEIGHT (PDF points) to count as a highlight. A real highlight is a
+# block covering a line of text (~9pt tall for ~10pt body text). Hyperlink
+# underlines and rule lines render as ~1pt-tall colored fills — they sit "under
+# text" too, so without this gate they were wrongly rescued to COLOR. Measured:
+# real highlights ≈ 9.1pt; hyperlink underlines ≈ 1.0pt — 4pt cleanly separates.
+_MIN_FILL_HEIGHT_PT = 4.0
+
 
 def _is_grayish(rgb: Tuple[float, float, float]) -> bool:
     r, g, b = rgb
@@ -101,8 +108,11 @@ def _page_has_highlight(page) -> Optional[str]:
             if min(r, g, b) > _NEAR_WHITE or max(r, g, b) < _NEAR_BLACK:
                 continue  # paper-white or near-black box, not a highlight
             rect = d.get("rect")
-            if rect is not None:
-                colored_rects.append((rect.x0, rect.y0, rect.x1, rect.y1))
+            if rect is None:
+                continue
+            if (rect.y1 - rect.y0) < _MIN_FILL_HEIGHT_PT:
+                continue  # thin line (hyperlink underline / rule), not a highlight block
+            colored_rects.append((rect.x0, rect.y0, rect.x1, rect.y1))
     except Exception:
         return None
 

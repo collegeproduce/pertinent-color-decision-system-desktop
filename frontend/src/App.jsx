@@ -179,8 +179,10 @@ function App() {
         setSelectedDocId((prev) => prev || restored[0].doc_id)
         restored.forEach((d) => {
           rendered.current[d.doc_id] = new Set()
-          openStream(d.doc_id)
         })
+        // NOTE: we intentionally do NOT open a stream per restored doc — the
+        // selected-doc effect below opens exactly one. Statuses for the rest
+        // stay fresh via the poll effect.
       } catch {
         // No prior session (or backend not up yet) — start clean.
       }
@@ -188,26 +190,71 @@ function App() {
     return () => {
       cancelled = true
     }
-  }, [openStream])
+  }, [])
 
-  // When the window becomes visible again (user returned from another app/tab),
-  // reopen streams for any document still in progress whose connection dropped
-  // while we were hidden.
+  // Keep exactly ONE live SSE stream open — for the selected document only.
+  // Opening a stream per document saturates the browser's ~6-connections-per-host
+  // limit on bulk uploads, which starves preview-image requests (blank numbered
+  // pages + a stuck spinner). The backend processes one doc at a time anyway, and
+  // its SSE endpoint replays full current state on (re)subscribe, so switching the
+  // single stream to whichever doc the user is viewing loses nothing.
+  useEffect(() => {
+    Object.keys(eventSources.current).forEach((id) => {
+      if (id !== selectedDocId) closeStream(id)
+    })
+    if (selectedDocId) {
+      terminal.current.delete(selectedDocId)
+      openStream(selectedDocId)
+    }
+  }, [selectedDocId, openStream, closeStream])
+
+  // Poll document statuses for the (unstreamed) sidebar while anything is still
+  // processing. Cheap: one request every 2.5s, merged into status/summary only —
+  // never clobbers the selected doc's SSE-driven pages.
+  const anyInProgress = documents.some(
+    (d) => d.status === 'queued' || d.status === 'analyzing'
+  )
+  useEffect(() => {
+    if (!anyInProgress) return
+    const tick = async () => {
+      try {
+        const res = await axios.get('/api/documents')
+        const byId = Object.fromEntries(
+          (res.data?.documents || []).map((d) => [d.doc_id, d])
+        )
+        setDocuments((prev) =>
+          prev.map((doc) => {
+            const u = byId[doc.doc_id]
+            if (!u) return doc
+            return {
+              ...doc,
+              status: u.status || doc.status,
+              summary: u.summary || doc.summary,
+              total_pages: u.total_pages ?? doc.total_pages,
+            }
+          })
+        )
+      } catch {
+        // transient — try again next tick
+      }
+    }
+    const iv = setInterval(tick, 2500)
+    return () => clearInterval(iv)
+  }, [anyInProgress])
+
+  // When the window becomes visible again, make sure the selected doc's single
+  // stream is reconnected if it dropped while hidden.
   useEffect(() => {
     const onVisible = () => {
       if (document.visibilityState !== 'visible') return
-      documents.forEach((d) => {
-        if (
-          (d.status === 'queued' || d.status === 'analyzing') &&
-          !eventSources.current[d.doc_id]
-        ) {
-          openStream(d.doc_id)
-        }
-      })
+      if (selectedDocId && !eventSources.current[selectedDocId]) {
+        terminal.current.delete(selectedDocId)
+        openStream(selectedDocId)
+      }
     }
     document.addEventListener('visibilitychange', onVisible)
     return () => document.removeEventListener('visibilitychange', onVisible)
-  }, [documents, openStream])
+  }, [selectedDocId, openStream])
 
   const handleFileUpload = async (files) => {
     setError(null)
@@ -232,7 +279,8 @@ function App() {
         setDocuments((prev) => [...prev, newDoc])
         if (!selectedDocId) setSelectedDocId(newDoc.doc_id)
         rendered.current[newDoc.doc_id] = new Set()
-        openStream(newDoc.doc_id)
+        // The single live stream is managed by the selected-doc effect; the poll
+        // effect keeps non-selected docs' statuses fresh. No per-upload stream.
       } catch (err) {
         console.error('Failed to upload:', file.name, err)
         setError(`Failed to upload ${file.name}`)

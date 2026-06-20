@@ -109,15 +109,48 @@ export function defaultPrintDecisionsFilename(now = new Date()) {
 }
 
 /**
- * Browser/Electron entry point: build the workbook and trigger a download.
- * Returns the filename written, or null when there is nothing finished to export.
+ * Browser/Electron entry point: build the workbook and save it.
+ *
+ * Prefers a native "Save As" dialog (File System Access API, available in
+ * Electron/Chromium and Chrome/Edge) so the user picks the destination instead
+ * of an automatic download to the default folder. Falls back to a plain
+ * download where that API isn't available.
+ *
+ * Async. Returns the saved filename, or null when there's nothing to export or
+ * the user cancels the Save dialog.
  */
-export function exportPrintDecisionsXlsx(documents, opts = {}) {
+export async function exportPrintDecisionsXlsx(documents, opts = {}) {
   const ready = (documents || []).filter((d) => d.status === 'done')
   if (ready.length === 0) return null
 
   const wb = buildPrintDecisionsWorkbook(documents)
   const filename = opts.filename ?? defaultPrintDecisionsFilename()
+
+  if (typeof window !== 'undefined' && typeof window.showSaveFilePicker === 'function') {
+    const buf = XLSX.write(wb, { bookType: 'xlsx', type: 'array' })
+    try {
+      const handle = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [
+          {
+            description: 'Excel Workbook',
+            accept: {
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+            },
+          },
+        ],
+      })
+      const writable = await handle.createWritable()
+      await writable.write(new Blob([buf]))
+      await writable.close()
+      return handle.name || filename
+    } catch (err) {
+      if (err && err.name === 'AbortError') return null // user cancelled the dialog
+      throw err
+    }
+  }
+
+  // Fallback: older browsers without the File System Access API.
   XLSX.writeFile(wb, filename)
   return filename
 }

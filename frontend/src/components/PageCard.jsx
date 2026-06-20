@@ -1,9 +1,26 @@
-import React from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import './PageCard.css'
 
 function PageCard({ page, onExpand }) {
   const isColor = page.decision === 'Color'
   const isPending = page.decision == null
+
+  // A preview can 404 if it's requested before the (single-threaded) renderer
+  // reaches that page. Retry a few times with a cache-bust so the thumbnail
+  // fills in instead of staying blank.
+  const [imgSrc, setImgSrc] = useState(page.preview)
+  const retries = useRef(0)
+  useEffect(() => {
+    setImgSrc(page.preview)
+    retries.current = 0
+  }, [page.preview])
+
+  const handleImgError = () => {
+    if (!page.preview || retries.current >= 6) return
+    retries.current += 1
+    const base = page.preview.split('?')[0]
+    setTimeout(() => setImgSrc(`${base}?r=${retries.current}`), 600 * retries.current)
+  }
 
   const handleClick = () => {
     if (isPending) return
@@ -33,8 +50,13 @@ function PageCard({ page, onExpand }) {
       title={title}
     >
       <div className="thumb-image">
-        {page.preview ? (
-          <img src={page.preview} alt={`Page ${page.page_id}`} loading="lazy" />
+        {imgSrc ? (
+          <img
+            src={imgSrc}
+            alt={`Page ${page.page_id}`}
+            loading="lazy"
+            onError={handleImgError}
+          />
         ) : (
           <div className="thumb-placeholder" />
         )}

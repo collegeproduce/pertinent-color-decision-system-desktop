@@ -45,6 +45,15 @@ function PageGrid({ document, onUpdate }) {
   const handleExpand = (page) => setExpandedPageId(page.page_id)
   const handleCloseModal = () => setExpandedPageId(null)
 
+  // Progress while a document is still being prepared. Engine analysis is
+  // whole-document (atomic), so the incremental, visible work is preview
+  // rendering — we show how many pages are ready out of the total.
+  const isProcessing = document.status === 'queued' || document.status === 'analyzing'
+  const totalPages =
+    document.total_pages || document.summary?.total_pages || document.pages.length || 0
+  const readyPages = document.previewsRendered || 0
+  const pct = totalPages ? Math.min(100, Math.round((readyPages / totalPages) * 100)) : 0
+
   const handleNavigateModal = (delta) => {
     const idx = document.pages.findIndex(p => p.page_id === expandedPageId)
     if (idx === -1) return
@@ -90,6 +99,23 @@ function PageGrid({ document, onUpdate }) {
           <span className="zoom-value">{zoom}px</span>
         </div>
       </div>
+
+      {isProcessing && (
+        <div className="grid-progress">
+          <div className="grid-progress-head">
+            <span className="grid-progress-spin" />
+            <span className="grid-progress-label">
+              {document.status === 'queued' ? 'Queued — waiting to analyze' : 'Analyzing'}
+            </span>
+            <span className="grid-progress-count">
+              {readyPages} / {totalPages || '…'} pages ready
+            </span>
+          </div>
+          <div className="grid-progress-track">
+            <div className="grid-progress-fill" style={{ width: `${pct}%` }} />
+          </div>
+        </div>
+      )}
 
       <div
         className="page-grid"

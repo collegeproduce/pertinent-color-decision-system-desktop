@@ -13,6 +13,10 @@ axios.defaults.baseURL = API_BASE
 const sseUrl = (path) => `${API_BASE}${path}`
 // img src — relative is fine when proxied, absolute in Electron.
 const previewUrl = (path) => `${API_BASE}${path}`
+// Append/refresh a cache-busting token so the browser re-requests an <img> that
+// previously 404'd (preview rendered after the first load attempt).
+let _bust = 0
+const bustCache = (url) => `${url.split('?')[0]}?v=${++_bust}`
 
 const buildPlaceholderPages = (docId, totalPages, renderedSet) =>
   Array.from({ length: totalPages }, (_, i) => {
@@ -82,11 +86,24 @@ function App() {
         const set = rendered.current[docId] || (rendered.current[docId] = new Set())
         set.add(page_id)
         updateDoc(docId, (doc) => {
-          // If decisions haven't arrived yet, refresh placeholder pages with the
-          // newly available preview. After `analyzed` arrives, doc.pages is the
-          // engine's authoritative list — don't overwrite.
-          if (doc.status === 'done' && doc.pages?.[0]?.decision) return {}
+          const previewsRendered = set.size
+          // After `analyzed`, doc.pages is the engine's authoritative list. But
+          // preview rendering (1 thread) lags behind analysis (8 workers), so a
+          // page's thumbnail can arrive AFTER its decision. Don't drop it —
+          // refresh just that one image with a cache-bust so a blank page fills
+          // in instead of staying empty.
+          if (doc.status === 'done' && doc.pages?.[0]?.decision) {
+            return {
+              previewsRendered,
+              pages: doc.pages.map((p) =>
+                p.page_id === page_id
+                  ? { ...p, preview: bustCache(previewUrl(`/api/document/${docId}/preview/${page_id}.png`)) }
+                  : p
+              ),
+            }
+          }
           return {
+            previewsRendered,
             pages: buildPlaceholderPages(docId, doc.total_pages || 0, set),
           }
         })
@@ -328,17 +345,18 @@ function App() {
     )
   }
 
-  const handleExportCSV = () => {
+  const handleExportCSV = async () => {
     // Client-side XLSX export (matches pertinent-color-export-pkg): one row per
     // finished document, with overrides already reflected in each page.decision.
+    // Opens a native Save As dialog so the user chooses where to save.
     const ready = documents.filter((d) => d.status === 'done')
     if (ready.length === 0) {
       alert('No completed documents to export yet.')
       return
     }
     try {
-      const filename = exportPrintDecisionsXlsx(documents)
-      if (!filename) alert('Nothing to export yet.')
+      await exportPrintDecisionsXlsx(documents)
+      // null return = user cancelled the Save dialog — nothing to report.
     } catch (err) {
       console.error('Failed to export:', err)
       alert('Failed to export spreadsheet')

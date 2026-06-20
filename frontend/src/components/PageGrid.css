@@ -98,3 +98,51 @@
   display: grid;
   gap: 10px;
 }
+
+/* --- Per-document progress (preview rendering / analyzing) --- */
+.grid-progress {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+}
+.grid-progress-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.grid-progress-label {
+  font-weight: 600;
+  color: #1f2937;
+}
+.grid-progress-count {
+  margin-left: auto;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+}
+.grid-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  overflow: hidden;
+}
+.grid-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: #4f46e5;
+  transition: width 0.3s ease;
+}
+.grid-progress-spin {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid #c7d2fe;
+  border-top-color: #4f46e5;
+  animation: grid-progress-spin 0.8s linear infinite;
+}
+@keyframes grid-progress-spin {
+  to { transform: rotate(360deg); }
+}

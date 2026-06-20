@@ -87,8 +87,11 @@ event_queues = {}
 ENGINE_EXECUTOR = ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="cpce-engine"
 )
+# One preview worker so thumbnails render one document at a time, in the same
+# order the engine analyzes them. Two workers interleaved previews across docs,
+# which made bulk uploads feel like everything was processing at once.
 PREVIEW_EXECUTOR = ThreadPoolExecutor(
-    max_workers=2, thread_name_prefix="preview-render"
+    max_workers=1, thread_name_prefix="preview-render"
 )
 
 # Global instances

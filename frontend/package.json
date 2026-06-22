@@ -1,6 +1,6 @@
 {
   "name": "pertinent-color-frontend",
-  "version": "1.3.5",
+  "version": "1.3.6",
   "description": "Frontend for Pertinent Color Decision System",
   "main": "electron/main.js",
   "private": true,

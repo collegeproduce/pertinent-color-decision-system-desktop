@@ -2,7 +2,7 @@
 ; Compile with: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
 
 #define MyAppName "Pertinent Color Decision System"
-#define MyAppVersion "1.3.5"
+#define MyAppVersion "1.3.6"
 #define MyAppPublisher "Pertinent Color"
 #define MyAppExeName "Pertinent Color Decision System.exe"
 #define SourceDir "frontend\build-final\Pertinent Color Decision System-win32-x64"

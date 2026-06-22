@@ -1,0 +1,224 @@
+name: Release Pertinent Color Decision System
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+
+jobs:
+  build:
+    name: ${{ github.ref_name == 'main' && 'Build & Release' || 'Dev Build' }}
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 2. Python ──────────────────────────────────────────────────
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r backend/requirements.txt
+          pip install pyinstaller bump2version
+
+      # ── 3. Node.js ─────────────────────────────────────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Node dependencies
+        run: npm ci
+        working-directory: frontend
+
+      # ── 4. Bump patch version (main only) ──────────────────────────
+      - name: Configure git identity
+        if: github.ref_name == 'main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump patch version
+        if: github.ref_name == 'main'
+        run: bump2version patch
+
+      # ── 5. Read version + short SHA ────────────────────────────────
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $v   = (Select-String -Path installer.iss -Pattern '#define MyAppVersion "(.+)"').Matches.Groups[1].Value
+          $sha = git rev-parse --short HEAD
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "sha=$sha"   | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "PCDS v$v ($sha)"
+
+      # ── 6. Build backend exe with PyInstaller ──────────────────────
+      - name: Build backend exe
+        shell: pwsh
+        run: |
+          python -m PyInstaller --name app --onefile `
+            "--add-data=*.py;." "--add-data=cpce;cpce" "--add-data=assets;assets" `
+            --hidden-import=pymupdf --hidden-import=flask --hidden-import=flask_cors `
+            --hidden-import=cv2 --hidden-import=scipy --hidden-import=sklearn `
+            --hidden-import=rapidfuzz --hidden-import=pytesseract `
+            --collect-all pymupdf --collect-all cv2 --collect-all scipy `
+            --collect-all sklearn --collect-all rapidfuzz `
+            app.py --distpath ../dist-backend --clean -y
+        working-directory: backend
+
+      - name: Verify backend exe
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist-backend\app.exe")) {
+            Write-Error "dist-backend\app.exe not found"
+            exit 1
+          }
+          $mb = [math]::Round((Get-Item "dist-backend\app.exe").Length / 1MB, 1)
+          Write-Host "Backend exe OK: dist-backend\app.exe ($mb MB)"
+
+      # ── 7. Build React frontend ────────────────────────────────────
+      - name: Build frontend
+        run: npm run build
+        working-directory: frontend
+
+      # ── 8. Package with electron-packager ─────────────────────────
+      - name: Package Electron app
+        shell: pwsh
+        run: |
+          npx electron-packager . "Pertinent Color Decision System" `
+            --platform=win32 --arch=x64 --out=build-final --overwrite `
+            "--ignore=node_modules|src|\.vite|dist-electron.*|build-.*|.*\.zip$"
+        working-directory: frontend
+
+      - name: Verify Electron package
+        shell: pwsh
+        run: |
+          $pkg = "frontend\build-final\Pertinent Color Decision System-win32-x64"
+          if (-not (Test-Path $pkg)) {
+            Write-Error "Electron package not found: $pkg"
+            exit 1
+          }
+          Write-Host "Electron package OK: $pkg"
+
+      # ── 9. Copy backend exe into the package ──────────────────────
+      - name: Copy backend exe into package
+        shell: pwsh
+        run: |
+          $dest = "frontend\build-final\Pertinent Color Decision System-win32-x64\resources\backend"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Copy-Item "dist-backend\app.exe" "$dest\app.exe"
+          Write-Host "Backend exe copied to $dest\app.exe"
+
+      # ── 10. Build installer with Inno Setup ────────────────────────
+      - name: Install Inno Setup 6
+        shell: pwsh
+        run: |
+          $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup*\ISCC.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($iscc) {
+            Write-Host "Inno Setup already installed at: $($iscc.FullName)"
+          } else {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = Get-ChildItem "C:\Program Files (x86)\Inno Setup*\ISCC.exe" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $iscc) { Write-Error "ISCC.exe not found"; exit 1 }
+          Write-Host "Using: $iscc"
+          & $iscc installer.iss
+          if ($LASTEXITCODE -ne 0) { Write-Error "Inno Setup failed"; exit 1 }
+
+      - name: Verify installer output
+        shell: pwsh
+        run: |
+          $v   = "${{ steps.ver.outputs.version }}"
+          $out = "installer-output\PertinentColor-Setup-$v.exe"
+          if (-not (Test-Path $out)) {
+            Write-Error "Installer not found: $out"
+            exit 1
+          }
+          $mb = [math]::Round((Get-Item $out).Length / 1MB, 1)
+          Write-Host "Installer ready: $out ($mb MB)"
+
+      # ── 11. Upload installer to downloads.litnmore.com (MinIO) ────
+      - name: Upload installer to MinIO
+        shell: pwsh
+        run: |
+          $v   = "${{ steps.ver.outputs.version }}"
+          $out = "installer-output\PertinentColor-Setup-$v.exe"
+
+          curl.exe -L -o "$env:TEMP\mc.exe" "https://dl.min.io/client/mc/release/windows-amd64/mc.exe"
+          $mc = "$env:TEMP\mc.exe"
+
+          & $mc alias set minio https://dev-minio.collegeproduce.com `
+            "$env:MINIO_ACCESS_KEY" "$env:MINIO_SECRET_KEY" --insecure
+
+          & $mc mb --insecure minio/pcds-releases --ignore-existing
+          & $mc anonymous set download --insecure minio/pcds-releases
+
+          & $mc cp --insecure $out "minio/pcds-releases/PertinentColor-Setup-$v.exe"
+          & $mc cp --insecure $out "minio/pcds-releases/PertinentColor-Setup-latest.exe"
+          Write-Host "Uploaded to https://downloads.litnmore.com/pcds-releases/PertinentColor-Setup-latest.exe"
+        env:
+          MINIO_ACCESS_KEY: ${{ secrets.MINIO_ACCESS_KEY }}
+          MINIO_SECRET_KEY: ${{ secrets.MINIO_SECRET_KEY }}
+
+      # ── 11a. Dev — move dev-latest tag + publish pre-release ──────
+      - name: Move dev-latest tag
+        if: github.ref_name == 'dev'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -f dev-latest
+          git push origin dev-latest --force
+
+      - name: Create dev pre-release
+        if: github.ref_name == 'dev'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-latest
+          name: PCDS dev (${{ steps.ver.outputs.version }}-dev.${{ steps.ver.outputs.sha }})
+          files: installer-output/PertinentColor-Setup-${{ steps.ver.outputs.version }}.exe
+          body: |
+            > **This is a development build — not for production use.**
+
+            Built from `dev` branch at commit `${{ steps.ver.outputs.sha }}`.
+            Based on version `${{ steps.ver.outputs.version }}`.
+          prerelease: true
+          draft: false
+
+      # ── 11b. Main — push version bump + publish GitHub Release ────
+      - name: Push version bump
+        if: github.ref_name == 'main'
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          git push origin HEAD:main
+          git push origin "v$v"
+
+      - name: Create GitHub Release
+        if: github.ref_name == 'main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: PCDS v${{ steps.ver.outputs.version }}
+          files: installer-output/PertinentColor-Setup-${{ steps.ver.outputs.version }}.exe
+          generate_release_notes: true
+          draft: false
+          prerelease: false

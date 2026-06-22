@@ -67,6 +67,10 @@ jobs:
           Write-Host "PCDS v$v ($sha)"
 
       # ── 6. Build backend exe with PyInstaller ──────────────────────
+      - name: Ensure assets directory exists
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force -Path backend\assets | Out-Null
+
       - name: Build backend exe
         shell: pwsh
         run: |

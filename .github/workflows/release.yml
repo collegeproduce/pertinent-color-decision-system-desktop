@@ -105,7 +105,11 @@ jobs:
         run: |
           npx electron-packager . "Pertinent Color Decision System" `
             --platform=win32 --arch=x64 --out=build-final --overwrite `
-            "--ignore=node_modules|src|\.vite|dist-electron.*|build-.*|.*\.zip$"
+            --ignore=src `
+            "--ignore=\.vite" `
+            "--ignore=dist-electron" `
+            "--ignore=build-final" `
+            "--ignore=.*\.zip"
         working-directory: frontend
 
       - name: Verify Electron package

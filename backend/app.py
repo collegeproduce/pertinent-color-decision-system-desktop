@@ -12,6 +12,7 @@ Per ARCHITECTURE.md and README_WEBAPP.md specifications.
 """
 
 import os
+import shutil
 import uuid
 import json
 import io
@@ -139,6 +140,52 @@ def render_previews_job(doc_id, filepath, total_pages):
         push_event(doc_id, 'error', {'message': f'preview rendering failed: {e}'})
 
 
+def _render_one_preview(doc_id, page_id):
+    """Render a single page thumbnail on demand and cache it back.
+
+    Used when a preview isn't in memory — either it hasn't rendered yet, or it
+    was evicted to bound memory (see _evict_old_previews). Re-renders from the
+    original PDF if it still exists, so evicted previews self-heal. Returns the
+    PNG bytes, or None if the source is gone.
+    """
+    with cache_lock:
+        entry = document_cache.get(doc_id)
+        fp = entry.get('filepath') if entry else None
+    if not fp or not Path(fp).exists():
+        return None
+    try:
+        with pymupdf.open(fp) as doc:
+            if page_id < 1 or page_id > len(doc):
+                return None
+            png_bytes = doc[page_id - 1].get_pixmap(dpi=72).tobytes('png')
+    except Exception as e:
+        print(f"  [preview] on-demand render failed {doc_id} p{page_id}: {e}")
+        return None
+    with cache_lock:
+        entry = document_cache.get(doc_id)
+        if entry is not None:
+            entry['previews'][page_id] = png_bytes
+    return png_bytes
+
+
+def _evict_old_previews(keep=5):
+    """Bound memory: keep rendered preview bytes for only the `keep` most-recent
+    documents in RAM. Evicted previews re-render on demand via _render_one_preview.
+
+    Previews (PNG bytes for every page of every doc) are the dominant memory
+    consumer; without this, RAM grows with every upload until the backend thrashes
+    and analysis stalls. The engine result / decisions stay cached — only the
+    re-renderable image bytes are dropped.
+    """
+    with cache_lock:
+        have = [(did, d) for did, d in document_cache.items() if d.get('previews')]
+        if len(have) <= keep:
+            return
+        have.sort(key=lambda kv: kv[1].get('uploaded_at') or '', reverse=True)
+        for did, d in have[keep:]:
+            d['previews'] = {}
+
+
 def process_engine_job(doc_id, filepath, filename):
     """Background job: run CPCE engine on the PDF (serialized — one at a time)."""
     started_at = datetime.now()
@@ -182,6 +229,7 @@ def process_engine_job(doc_id, filepath, filename):
         push_event(doc_id, 'analyzed', {'pages': pages_data, 'summary': summary})
         push_event(doc_id, 'done', {})
         _persist_doc(doc_id)  # survive restart / app close
+        _evict_old_previews()  # bound memory across many uploads
         print(
             f"✅ {filename}: {summary['color_pages']} color, "
             f"{summary['bw_pages']} B&W, "
@@ -343,6 +391,56 @@ def _result_from_pages(pages_data, total_pages):
     return DocumentResult(total_pages=total_pages or len(pages), pages=pages)
 
 
+def _cleanup_stale_mei_dirs():
+    """Remove leaked PyInstaller onefile extraction dirs from prior crashed runs.
+
+    Each orphaned backend leaves a ~200MB `_MEIxxxx` dir in TEMP; over days of
+    use these pile up and fill the disk (→ 'failed to upload'). We only run this
+    in a frozen build, and we never touch the dir we're currently running from.
+    """
+    if not getattr(sys, 'frozen', False):
+        return
+    current = getattr(sys, '_MEIPASS', None)
+    try:
+        tmp = Path(tempfile.gettempdir())
+        for d in tmp.glob('_MEI*'):
+            try:
+                if not d.is_dir():
+                    continue
+                if current and Path(current).resolve() == d.resolve():
+                    continue  # the bundle we're running from
+                shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass  # in use / locked → skip
+    except Exception:
+        pass
+
+
+def _prune_persisted_docs(keep=60):
+    """Bound disk growth: keep only the most-recent `keep` persisted documents,
+    deleting older cache snapshots and their original uploaded PDFs."""
+    try:
+        caches = sorted(
+            RESULTS_FOLDER.glob("cache_*.json"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for old in caches[keep:]:
+            try:
+                with open(old, encoding='utf-8') as fh:
+                    fp = json.load(fh).get('filepath')
+                if fp and Path(fp).exists():
+                    Path(fp).unlink()
+            except Exception:
+                pass
+            try:
+                old.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _load_persisted_docs():
     """Restore previously-analysed documents into the cache at startup."""
     count = 0
@@ -377,6 +475,11 @@ def _load_persisted_docs():
     if count:
         print(f"♻️  Restored {count} document(s) from previous session")
 
+
+# Reclaim disk from prior crashed runs and cap stored history before restoring,
+# so the app self-heals over long-term use instead of degrading.
+_cleanup_stale_mei_dirs()
+_prune_persisted_docs()
 
 # Restore prior session's work at import time (runs for both `python app.py`
 # and any WSGI/embedded launch).
@@ -465,6 +568,9 @@ def get_preview(doc_id, page_id):
     with cache_lock:
         entry = document_cache.get(doc_id)
         png_bytes = entry['previews'].get(page_id) if entry else None
+    if png_bytes is None:
+        # Not in memory (not yet rendered, or evicted to save RAM) — render it now.
+        png_bytes = _render_one_preview(doc_id, page_id)
     if png_bytes is None:
         return ('', 404)
     return Response(
